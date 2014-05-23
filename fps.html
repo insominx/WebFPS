@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>FPS Example</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+<link rel="stylesheet" type="text/css" href="css/main.css">
+</head>
+<body>
+
+<div id="container"></div>
+<button class="btn lockBtn" id="lockButton" type="button">lock pointer</button>
+<audio id="gunshot" src="audio/M4A1_Single-Kibblesbob-8540445.wav"></audio>
+
+<script src="js/ammo.js"></script>
+<script src="js/AmmoUtils.js"></script>
+<script src="js/AmmoMesh.js"></script>
+<script src="js/Three.js"></script>
+<script src="js/ThreeUtils.js"></script>
+<script src="js/AmmoFPSController.js"></script>
+<script src="js/FpsGui.js"></script>
+<script src="js/PointerLockAngleControls.js"></script>
+<script src="js/TerrainGeometryBasic.js"></script>
+<script src="js/dat.gui.min.js"></script>
+<script src="js/stats.min.js"></script>
+
+<!-- ShaderParticles -->
+<script src="js/ShaderParticleUtils.js"></script>
+<script src="js/ShaderParticleGroup.js"></script>
+<script src="js/ShaderParticleEmitter.js"></script>
+<script src="js/ImpactPuff.js"></script>
+<script src="js/ImpactSparks.js"></script>
+<script src="js/ImpactBall.js"></script>
+<script src="js/Explosion.js"></script>
+
+<script src="js/shaders/CopyShader.js"></script>
+<script src="js/shaders/ConvolutionShader.js"></script>
+<script src="js/postprocessing/EffectComposer.js"></script>
+<script src="js/postprocessing/MaskPass.js"></script>
+<script src="js/postprocessing/RenderPass.js"></script>
+<script src="js/postprocessing/ShaderPass.js"></script>
+<script src="js/postprocessing/BloomPass.js"></script>
+
+<script type="application/x-javascript">
+
+var scene = new THREE.Scene();
+var skyScene = new THREE.Scene();
+var hudScene = new THREE.Scene();
+
+var dynamicsWorld = Ammo.Utils.createWorld( -50 );
+
+var fpsCamera = null, fpsControls = null;
+var hudCamera = null;
+
+var clock = new THREE.Clock();
+var character = null;
+
+var gui = null;
+var guiOptions = null;
+var lockButton = document.getElementById('lockButton');
+var stats = null;
+
+var fpsControlRadius = 0.5;
+var fpsControlHeight = 10;
+var fpsControlEyeHeight = 8;
+
+var MAX_TERRAIN_HEIGHT = 200;
+
+// particles
+var impactPuffs = [];
+var impactSparks = [];
+var impactBall = null;
+var explosion = null;
+var currentPuffIndex = -1;
+var currentSparkIndex = -1;
+
+var terrainMesh = null;
+var skyMesh = null;
+var dynamicObjects = [];
+var barrelMesh = null;
+
+var composer = null;
+
+// -----------------------------------------------------------------------------
+function init() {
+
+  setupRenderer();
+
+  // Load the terrain first
+  setupTerrain( function() {
+
+    setupSkybox();
+    setupLights();
+    setupPlayer();
+    setupHUD();
+    setupDynamicObjects();
+    setupStaticObjects();
+    setupEffects();
+    setupGui();
+
+    setupPostProcessing();
+
+    updateAndRender();
+
+  });
+
+  stats = new Stats();
+  stats.domElement.style.position = 'absolute';
+  stats.domElement.style.top = '0px';
+  document.body.appendChild( stats.domElement );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupSkybox() {
+
+  skyMesh = THREEx.Utils.createSkybox( 'textures/sunnysky/', '.jpg', 20000 );
+  skyScene.add( skyMesh );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupRenderer() {
+
+  container = document.getElementById( 'container' );
+
+  var aspect = window.innerWidth / window.innerHeight;
+  fpsCamera = new THREE.PerspectiveCamera( 60, aspect, 0.1, 40000 );
+
+  renderer = new THREE.WebGLRenderer();
+  renderer.setSize( window.innerWidth, window.innerHeight );
+  renderer.shadowMapEnabled = true;
+  renderer.shadowMapType = THREE.PCFSoftShadowMap;
+  renderer.autoClear = false;
+  container.appendChild( renderer.domElement );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupPostProcessing() {
+
+  var renderModel = new THREE.RenderPass( scene, fpsCamera );
+  var effectBloom = new THREE.BloomPass( 0.5, 25, 4, 256 );
+  var effectCopy = new THREE.ShaderPass( THREE.CopyShader );
+
+  effectCopy.renderToScreen = true;
+  renderModel.clear = false;
+
+  var renderBackground = new THREE.RenderPass( skyScene, fpsCamera );
+  var hud = new THREE.RenderPass( hudScene, hudCamera );
+
+  composer = new THREE.EffectComposer( renderer );
+  composer.addPass( renderBackground );
+  composer.addPass( renderModel );
+  composer.addPass( effectBloom );
+  composer.addPass( effectCopy );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupLights() {
+
+  var light = new THREE.DirectionalLight( 0xffffff );
+  light.castShadow = true;
+  light.shadowMapWidth = 2048;
+  light.shadowMapHeight = 2048;
+  light.shadowDarkness = 0.5;
+  light.shadowCameraNear = 5;
+  light.shadowCameraFar = 500;
+  light.shadowBias = 0.001;
+  light.shadowCameraRight =  300;
+  light.shadowCameraLeft = -300;
+  light.shadowCameraTop =  300;
+  light.shadowCameraBottom = -300;
+  //light.shadowCameraVisible = true;
+  light.position.set( -200, 300, 200 );
+
+  scene.add( light );
+
+  light = new THREE.AmbientLight( 0x333333 );
+  scene.add( light );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupPlayer() {
+
+  var startHeight = terrainMesh.geometry.getTerrainHeight( 0, 0 ) + fpsControlHeight + 0.1;
+
+  character = new THREE.Object3D();
+  character.position.set( 0, startHeight, 0 );
+  character.matrixAutoUpdate = false;
+  scene.add( character );
+
+  fpsControls = new AmmoFPSController( fpsCamera, character, fpsControlRadius, fpsControlHeight, fpsControlEyeHeight, dynamicsWorld );
+  fpsControls.movementSpeed = 20;
+  fpsControls.jumpImpulse = 2000;
+
+}
+
+// -----------------------------------------------------------------------------
+function setupTerrain( completeCB ) {
+
+  var width = 1000;
+  var length = 1000;
+  var widthSegs = 200;
+  var lengthSegs = 200;
+
+  var terrainTexture = THREE.ImageUtils.loadTexture( 'textures/terrain/dirt.jpg' );
+  var groundMaterial = new THREE.MeshLambertMaterial( { map: terrainTexture } );
+
+  // Tile ground texture across terrain
+  terrainTexture.repeat.set( 40, 40 );
+  terrainTexture.wrapS = THREE.Repeat;
+  terrainTexture.wrapT = THREE.Repeat;
+
+  // Create terrain geometry and mesh based on height texture
+  var terrain = new THREE.TerrainGeometryBasic( MAX_TERRAIN_HEIGHT, width, length, widthSegs, lengthSegs );
+  terrain.createGeometry( 'textures/terrain/heightmap.png', function() {
+
+    terrainMesh = new THREE.Mesh( terrain, groundMaterial );
+    terrainMesh.receiveShadow = true;
+    scene.add( terrainMesh );
+    dynamicsWorld.addRigidBody( Ammo.Utils.createHeightfield( terrain, widthSegs, lengthSegs ) );
+
+    completeCB && completeCB();
+
+  });
+
+}
+
+// -----------------------------------------------------------------------------
+function setupHUD() {
+
+  var aspect = window.innerWidth / window.innerHeight;
+  hudCamera = new THREE.OrthographicCamera( -aspect, aspect, 1, -1, 0.1, 1);
+
+  var texture = new THREE.ImageUtils.loadTexture( 'textures/reticle.png' );
+  var material = new THREE.SpriteMaterial( { map: texture, transparent: true } );
+  var reticle = new THREE.Sprite( material );
+  reticle.scale.set( 0.5, 0.5, 0.5 );
+  reticle.position.set( 0, 0, -0.5 );
+  hudScene.add( reticle );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupDynamicObjects() {
+
+  var width = 300;
+  var length = 300;
+
+  var segmentWidth = width / 5;
+  var segmentLength = length / 5;
+
+  // Start a little away from the edge
+  var startX = -150 + segmentWidth / 2;
+  var startZ = -150 + segmentLength / 2;
+
+  var radius = 3;
+
+  var geometry = new THREE.SphereGeometry( radius, 10, 10 );
+  var material = new THREE.MeshLambertMaterial();
+
+  // Create uniformly spaced spheres to fall on the terrain
+  for ( var z = 0; z < 5; ++z ) {
+
+    for ( var x = 0; x < 5; ++x ) {
+
+      var xPos = startX + segmentWidth * x;
+      var zPos = startZ + segmentLength * z;
+
+      var newObject = new AmmoMesh(
+        geometry,
+        material,
+        xPos,
+        terrainMesh.geometry.getTerrainHeight( xPos, zPos ) + radius + 30,
+        zPos
+      );
+
+      newObject.rigidBody.type = 'ball';
+
+      scene.add( newObject.renderMesh );
+      dynamicsWorld.addRigidBody( newObject.rigidBody );
+
+      dynamicObjects.push( newObject );
+
+    }
+
+  }
+
+}
+
+// -----------------------------------------------------------------------------
+function setupStaticObjects() {
+
+  var loadBatch = [
+    { name: 'container', url:'models/environment/29palms/shippingcontainer.js' },
+    { name: 'collision', url:'models/environment/29palms/collision_shippingcontainer.js' },
+    { name: 'barrel', url:'models/environment/29palms/barrel.js' }
+  ];
+
+  THREEx.Utils.batchLoadJSON( loadBatch, function( results ) {
+
+    var crateGeom = results['container'].geometry;
+    var barrelGeom = results['barrel'].geometry;
+    var crateCollision = results['collision'].geometry;
+    var crateMat = results['container'].materials[ 0 ];
+    var barrelMat = results['barrel'].materials[ 0 ];
+
+    var angle = Math.PI / 2;
+    var angle = 2*Math.PI;
+    var degrees = 360;
+
+    var getAngle = function ( degrees ) {
+      var angle = 2 * Math.PI;
+      return angle * ( degrees / 360 );
+    };
+
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 50, 100, 50, getAngle(10));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 50, 100, 250, getAngle(90));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -200, 90, 200, getAngle(90));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -200, 96, 160, getAngle(90));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -200, 100, 120, getAngle(90));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -200, 100, 80, getAngle(90));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -50, 50, 40, getAngle(0));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 100, 100, 50 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 150, 100, 50 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 200, 100, 50 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 280, 110, 50, getAngle(45));
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 180, 110, -150 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 280, 110, -150, getAngle(90) );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 300, 110, -120, getAngle(90) );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 400, 110, -100, getAngle(0) );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 140, 110, -150 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 90, 115, -150 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, 0, 115, -170 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -50, 115, -190 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -70, 100, 30 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -120, 100, 60 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -160, 100, 55 );
+    setupStaticMeshObject( crateGeom, crateMat, crateCollision, -250, 100, 10 );
+
+    var barrelHeight = terrainMesh.geometry.getTerrainHeight( -50, 50 );
+    barrelMesh = setupStaticCylinderObject( barrelGeom, barrelMat, -50, barrelHeight, 50 );
+
+  });
+
+}
+
+// -----------------------------------------------------------------------------
+function setupStaticMeshObject( renderGeometry, renderMaterial, collisionGeometry, x, y, z, yaw ) {
+
+  yaw = ( yaw != undefined ) ? yaw: 0;
+
+  var renderMesh = new THREE.Mesh( renderGeometry, renderMaterial );
+  renderMesh.castShadow = true;
+  renderMesh.receiveShadow = true;
+  renderMesh.position.set( x, y, z );
+  renderMesh.rotation.y = yaw;
+  scene.add( renderMesh );
+
+  var points = [];
+
+  for ( var i = 0; i < collisionGeometry.vertices.length; ++i ) {
+
+    points.push( collisionGeometry.vertices[ i ].x );
+    points.push( collisionGeometry.vertices[ i ].y );
+    points.push( collisionGeometry.vertices[ i ].z );
+
+  }
+
+  var body = Ammo.Utils.createStaticConvexHull( points, x, y, z, yaw, 0, 0 );
+  body.type = "crate";
+  dynamicsWorld.addRigidBody( body );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupStaticCylinderObject( renderGeometry, renderMaterial, x, y, z ) {
+
+  var renderMesh = new THREE.Mesh( renderGeometry, renderMaterial );
+  renderMesh.castShadow = true;
+  renderMesh.receiveShadow = true;
+  renderMesh.position.set( x, y, z );
+  scene.add( renderMesh );
+
+  renderGeometry.computeBoundingBox();
+
+  var box = renderGeometry.boundingBox;
+
+  var xSize = box.max.x - box.min.x;
+  var zSize = box.max.z - box.min.z;
+  var height = box.max.y - box.min.y;
+
+  var radius = ( xSize > zSize ) ? xSize: zSize;
+
+  var body = Ammo.Utils.createStaticCylinder( radius, height, radius, x, y, z );
+  body.type = "barrel";
+  dynamicsWorld.addRigidBody( body );
+
+  return renderMesh;
+
+}
+
+// -----------------------------------------------------------------------------
+function setupEffects() {
+
+  for ( var i = 0; i < 10; ++i ) {
+    var puff = new ImpactPuff();
+    scene.add( puff.particleGroup.mesh );
+    impactPuffs.push( puff );
+  }
+
+  for ( var i = 0; i < 10; ++i ) {
+    var spark = new ImpactSparks();
+    scene.add( spark.particleGroup.mesh );
+    impactSparks.push( spark );
+  }
+
+  impactBall = new ImpactBall();
+  scene.add( impactBall.particleGroup.mesh );
+
+  explosion = new Explosion();
+  scene.add( explosion.particleGroup.mesh );
+
+}
+
+// -----------------------------------------------------------------------------
+function setupGui() {
+
+  guiOptions = { bloom: true };
+  gui = new FpsGui( fpsControls, character, guiOptions );
+
+  Ammo.Utils.createStaticConvexHull( 0, 0, 0 );
+
+}
+
+// -----------------------------------------------------------------------------
+function updateAndRender() {
+
+  requestAnimationFrame( updateAndRender, renderer.domElement );
+
+  var dt = clock.getDelta();
+
+  fpsControls.update( dt );
+
+  updateEffects();
+  updateGui();
+
+  // todo, add fixed time step for physics?
+  dynamicsWorld.stepSimulation( dt, 1 );
+
+  // Make sure you can't get closer to the skybox
+  skyMesh.position.copy( fpsCamera.position );
+
+  renderer.clear();
+
+  if ( guiOptions.bloom ) {
+    composer.render( scene, fpsCamera );
+  } else {
+    renderer.render( skyScene, fpsCamera );
+    renderer.render( scene, fpsCamera );
+  }
+
+  if ( lockButton.style.visibility === 'hidden' ) {
+    renderer.clear( false, true, false );
+    renderer.render( hudScene, hudCamera );
+  }
+
+
+  stats.update();
+
+}
+
+// -----------------------------------------------------------------------------
+function updateEffects() {
+
+  for ( var i = 0; i < impactPuffs.length; ++i ) {
+    impactPuffs[ i ].particleGroup.tick();
+  }
+
+  for ( var i = 0; i < impactSparks.length; ++i ) {
+    impactSparks[ i ].particleGroup.tick();
+  }
+
+  impactBall.particleGroup.tick();
+  explosion.particleGroup.tick();
+
+  for ( var i = 0; i < dynamicObjects.length; ++i ) {
+    dynamicObjects[ i ].update();
+  }
+
+}
+
+// -----------------------------------------------------------------------------
+var fireGun = (function() {
+
+  var vector = new THREE.Vector3();
+  var camPos = new THREE.Vector3();
+  var projector = new THREE.Projector();
+
+  return function() {
+
+    if ( terrainMesh ) {
+
+      camPos.copy( fpsCamera.position );
+      fpsCamera.localToWorld( camPos );
+
+      // Convert the [-1, 1] screen coordinate into a world coordinate on the near plane
+      vector.set( 0, 0, fpsCamera.near );
+      projector.unprojectVector( vector, fpsCamera );
+
+      var direction = vector.sub( camPos ).normalize();
+
+      var fromPoint = Ammo.Utils.createAmmoVector3FromThree( camPos );
+      var toPoint = Ammo.Utils.createAmmoVector3FromThree( camPos );
+      var ammoDir = Ammo.Utils.createAmmoVector3FromThree( direction );
+
+      // Start in front of our collision geometry
+      ammoDir.op_mul( fpsControlRadius + 0.001 );
+      fromPoint.op_add( ammoDir );
+
+      ammoDir.op_mul( 100000 );
+      toPoint.op_add( ammoDir );
+
+      var rayCallback = new Ammo.ClosestRayResultCallback( fromPoint, toPoint );
+
+      dynamicsWorld.rayTest( fromPoint, toPoint, rayCallback );
+
+      if ( rayCallback.hasHit() ) {
+
+        var body = Ammo.castObject( rayCallback.get_m_collisionObject(), Ammo.btRigidBody );
+        if (body) {
+
+          var force = Ammo.Utils.createAmmoVector3FromThree( direction ).op_mul( 20 );
+          var hitPoint = rayCallback.get_m_hitPointWorld();
+          var normal = rayCallback.get_m_hitNormalWorld();
+
+          var ACTIVE_TAG = 1;
+          body.setActivationState( ACTIVE_TAG );
+
+          // This transformation may be incorrect
+          var centerTran = body.getCenterOfMassTransform().inverse();
+          body.applyImpulse( force, centerTran.op_mul( hitPoint ) );
+
+          fireEffect( hitPoint, normal, body );
+
+        }
+
+      }
+
+    }
+  }
+
+})();
+
+// -----------------------------------------------------------------------------
+function fireEffect( ammoPoint, ammoNormal, body ) {
+
+  var normOffset = 0.5;
+  var x = ammoPoint.getX() + ammoNormal.getX() * normOffset;
+  var y = ammoPoint.getY() + ammoNormal.getY() * normOffset;
+  var z = ammoPoint.getZ() + ammoNormal.getZ() * normOffset;
+
+  if ( body.type === 'ball') {
+
+    var effect = impactBall;
+
+  } else if ( body.type === 'crate' ) {
+
+    // Grab the last used particle system
+    currentSparkIndex = ( currentSparkIndex + 1 ) % impactSparks.length;
+    var effect = impactSparks[ currentSparkIndex ];
+
+  } else if ( body.type === 'barrel' ) {
+
+    barrelMesh.visible = false;
+    dynamicsWorld.removeRigidBody( body );
+
+    explosion.explosionEmitter.enable();
+    explosion.projectileEmitter.enable();
+
+    explosion.particleGroup.mesh.position.set( x, y, z );
+
+    return;
+
+  } else {
+
+    // Grab the last used particle system
+    currentPuffIndex = ( currentPuffIndex + 1 ) % impactPuffs.length;
+    var effect = impactPuffs[ currentPuffIndex ];
+
+  }
+
+
+  effect.particleGroup.mesh.position.set( x, y, z );
+  effect.setNormal( ammoNormal.getX(), ammoNormal.getY(), ammoNormal.getZ() );
+
+  // Restart the particle effect
+  effect.emitter.reset( true );
+  effect.emitter.enable();
+
+}
+
+// -----------------------------------------------------------------------------
+function updateGui() {
+
+  var height = character.matrixWorld.elements[ 13 ].toFixed(3);
+  gui.controls.height = height;
+
+}
+
+// -----------------------------------------------------------------------------
+function onWindowResize() {
+
+  fpsCamera.aspect = window.innerWidth / window.innerHeight;
+  fpsCamera.updateProjectionMatrix();
+
+}
+
+// ---------------------------------------------------------------------------
+var onKeyDown = function(evt) {
+
+  var index;
+  switch (evt.keyCode) {
+    case 65: // 'a'
+    case 37: // left
+      index = 0;
+      fpsControls.left = true;
+      break;
+    case 68: // 'd'
+    case 39: // right
+      index = 1;
+      fpsControls.right = true;
+      break;
+    case 87: // 'w'
+    case 38: // up
+      index = 3;
+      fpsControls.ahead = true;
+      break;
+    case 83: // 's'
+    case 40: // down
+      index = 2;
+      fpsControls.back = true;
+      break;
+    case 32: // spacebar
+      fpsControls.jump = true;
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+var onKeyUp = function(evt) {
+
+  switch ( evt.keyCode ) {
+    case 65: // 'a'
+    case 37: // left
+      index = 0;
+      fpsControls.left = false;
+      break;
+    case 68: // 'd'
+    case 39: // right
+      index = 1;
+      fpsControls.right = false;
+      break;
+    case 87: // 'w'
+    case 38: // up
+      index = 3;
+      fpsControls.ahead = false;
+      break;
+    case 83: // 's'
+    case 40: // down
+      index = 2;
+      fpsControls.back = false;
+      break;
+    case 32: // spacebar
+      break;
+  }
+
+}
+
+// -----------------------------------------------------------------------------
+var onMouseDown = function() {
+
+  fireGun();
+
+  var audio = document.getElementById('gunshot');
+  audio.currentTime = 0;
+  audio.play();
+}
+
+// -----------------------------------------------------------------------------
+var onPointerLockChange = function() {
+
+  var isVisible = lockButton.style.visibility.length === 0;
+  lockButton.style.visibility = ( isVisible ) ? "hidden": "";
+
+}
+
+window.onkeydown = onKeyDown;
+window.onkeyup = onKeyUp;
+window.onmousedown = onMouseDown;
+window.onresize = onWindowResize;
+window.onload = init;
+
+document.getElementById('lockButton').onclick = function() {
+  fpsControls.lockPointer();
+}
+
+document.addEventListener( 'pointerlockchange', onPointerLockChange, false);
+document.addEventListener( 'mozpointerlockchange', onPointerLockChange, false);
+document.addEventListener( 'webkitpointerlockchange', onPointerLockChange, false);
+
+</script>
+
+</body>
+</html>
